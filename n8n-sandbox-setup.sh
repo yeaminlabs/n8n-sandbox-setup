@@ -170,60 +170,205 @@ fi
 #  MODE: setup (default)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── STEP 1: Prerequisites ─────────────────────────────────────────────────────
+# ── STEP 1: Prerequisites — auto-install anything missing ────────────────────
 banner "Step 1 — Prerequisites"
 
-PREREQ_OK=1
+# Detect OS
+OS_TYPE=""
+PKG_MGR=""
+if [[ "$OSTYPE" == "darwin"* ]]; then
+  OS_TYPE="macos"
+elif [ -f /etc/os-release ]; then
+  . /etc/os-release
+  case "${ID:-}" in
+    ubuntu|debian|linuxmint) OS_TYPE="debian"; PKG_MGR="apt-get" ;;
+    centos|rhel|rocky|almalinux)
+      OS_TYPE="rhel"
+      have dnf && PKG_MGR="dnf" || PKG_MGR="yum"
+      ;;
+    fedora) OS_TYPE="rhel"; PKG_MGR="dnf" ;;
+    *) OS_TYPE="linux-unknown" ;;
+  esac
+fi
+info "Detected OS: ${OS_TYPE} ${PRETTY_NAME:-}"
 
-if have docker; then
-  DOCKER_VER=$(docker --version 2>/dev/null)
-  ok "Docker found: $DOCKER_VER"
+# ── auto-install helper ───────────────────────────────────────────────────────
+pkg_install() {
+  local pkg="$1" label="${2:-$1}"
+  info "Installing $label ..."
+  case "$OS_TYPE" in
+    macos)
+      if ! have brew; then
+        info "Homebrew not found — installing Homebrew first ..."
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+      fi
+      brew install "$pkg" 2>&1 | tail -5
+      ;;
+    debian)
+      apt-get update -qq 2>/dev/null
+      apt-get install -y "$pkg" 2>&1 | tail -5
+      ;;
+    rhel)
+      $PKG_MGR install -y "$pkg" 2>&1 | tail -5
+      ;;
+    *)
+      fail "Cannot auto-install on this OS. Please install $label manually."
+      return 1
+      ;;
+  esac
+}
+
+install_docker() {
+  case "$OS_TYPE" in
+    macos)
+      warn "Docker Desktop is required on macOS."
+      warn "Download from: https://www.docker.com/products/docker-desktop/"
+      warn "Or install via Homebrew: brew install --cask docker"
+      if have brew; then
+        info "Installing Docker Desktop via Homebrew ..."
+        brew install --cask docker 2>&1 | tail -5
+        info "Launch Docker Desktop from Applications, then re-run this script."
+      fi
+      exit 1
+      ;;
+    debian)
+      info "Installing Docker Engine via official script ..."
+      curl -fsSL https://get.docker.com | sh
+      systemctl enable docker --now 2>/dev/null || true
+      ;;
+    rhel)
+      info "Installing Docker Engine via official script ..."
+      curl -fsSL https://get.docker.com | sh
+      systemctl enable docker --now 2>/dev/null || true
+      ;;
+    *)
+      fail "Cannot auto-install Docker on this OS. See https://docs.docker.com/get-docker/"
+      exit 1
+      ;;
+  esac
+}
+
+install_docker_compose() {
+  case "$OS_TYPE" in
+    debian)
+      apt-get update -qq 2>/dev/null
+      apt-get install -y docker-compose-plugin 2>&1 | tail -5
+      ;;
+    rhel)
+      $PKG_MGR install -y docker-compose-plugin 2>&1 | tail -5 || \
+      $PKG_MGR install -y docker-compose 2>&1 | tail -5
+      ;;
+    macos)
+      # Docker Desktop installs the compose plugin but it only activates once
+      # the daemon is running. Check if the plugin binary already exists.
+      COMPOSE_PLUGIN_PATHS=(
+        "$HOME/.docker/cli-plugins/docker-compose"
+        "/usr/local/lib/docker/cli-plugins/docker-compose"
+        "/usr/local/libexec/docker/cli-plugins/docker-compose"
+        "/Applications/Docker.app/Contents/Resources/cli-plugins/docker-compose"
+      )
+      for p in "${COMPOSE_PLUGIN_PATHS[@]}"; do
+        if [ -x "$p" ]; then
+          # Wire it up as a standalone binary so we can call it without daemon
+          ln -sf "$p" /usr/local/bin/docker-compose 2>/dev/null || true
+          info "Linked Docker Compose plugin from $p"
+          return 0
+        fi
+      done
+      info "Docker Compose not found on disk. Install Docker Desktop to get it:"
+      info "  brew install --cask docker   OR   https://www.docker.com/products/docker-desktop/"
+      warn "Start Docker Desktop, then re-run this script."
+      exit 1
+      ;;
+    *)
+      info "Trying standalone docker-compose install ..."
+      COMPOSE_VER=$(curl -s https://api.github.com/repos/docker/compose/releases/latest \
+        | grep '"tag_name"' | cut -d'"' -f4)
+      curl -SL "https://github.com/docker/compose/releases/download/${COMPOSE_VER}/docker-compose-$(uname -s)-$(uname -m)" \
+        -o /usr/local/bin/docker-compose
+      chmod +x /usr/local/bin/docker-compose
+      ;;
+  esac
+}
+
+# ── curl ─────────────────────────────────────────────────────────────────────
+if have curl; then
+  ok "curl found: $(curl --version 2>/dev/null | head -n1)"
 else
-  fail "Docker not found. Install from https://docs.docker.com/get-docker/"
-  PREREQ_OK=0
+  warn "curl not found — installing ..."
+  case "$OS_TYPE" in
+    macos)   pkg_install curl ;;
+    debian)  pkg_install curl ;;
+    rhel)    pkg_install curl ;;
+    *)       fail "Install curl manually then re-run."; exit 1 ;;
+  esac
+  have curl && ok "curl installed." || { fail "curl install failed."; exit 1; }
 fi
 
+# ── openssl ───────────────────────────────────────────────────────────────────
+if have openssl; then
+  ok "openssl found: $(openssl version 2>/dev/null)"
+else
+  warn "openssl not found — installing ..."
+  case "$OS_TYPE" in
+    macos)   pkg_install openssl ;;
+    debian)  pkg_install openssl ;;
+    rhel)    pkg_install openssl ;;
+    *)       fail "Install openssl manually then re-run."; exit 1 ;;
+  esac
+  have openssl && ok "openssl installed." || { fail "openssl install failed."; exit 1; }
+fi
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+if have docker; then
+  ok "Docker found: $(docker --version 2>/dev/null)"
+else
+  warn "Docker not found — installing ..."
+  install_docker
+  have docker && ok "Docker installed: $(docker --version 2>/dev/null)" || { fail "Docker install failed."; exit 1; }
+fi
+
+# ── Docker Compose ────────────────────────────────────────────────────────────
 if docker compose version >/dev/null 2>&1; then
   DC="docker compose"
-  DC_VER=$(docker compose version 2>/dev/null | head -n1)
-  ok "Docker Compose (plugin) found: $DC_VER"
+  ok "Docker Compose (plugin) found: $(docker compose version 2>/dev/null | head -n1)"
 elif have docker-compose; then
   DC="docker-compose"
-  DC_VER=$(docker-compose --version 2>/dev/null)
-  ok "docker-compose (standalone) found: $DC_VER"
-  warn "docker-compose v1 detected. Upgrading to Docker Compose v2 is recommended."
+  ok "docker-compose found: $(docker-compose --version 2>/dev/null)"
+  warn "docker-compose v1 detected — Compose v2 is recommended."
 else
-  fail "Docker Compose not found. Install Docker Desktop or run: apt install docker-compose-plugin"
-  PREREQ_OK=0
-  DC="docker compose"
+  warn "Docker Compose not found — installing ..."
+  install_docker_compose
+  if docker compose version >/dev/null 2>&1; then
+    DC="docker compose"
+    ok "Docker Compose installed: $(docker compose version 2>/dev/null | head -n1)"
+  elif have docker-compose; then
+    DC="docker-compose"
+    ok "docker-compose installed: $(docker-compose --version 2>/dev/null)"
+  else
+    fail "Docker Compose install failed. Install manually: https://docs.docker.com/compose/install/"
+    exit 1
+  fi
 fi
 
-if have openssl; then
-  SSL_VER=$(openssl version 2>/dev/null)
-  ok "openssl found: $SSL_VER"
-else
-  fail "openssl not found. Install via: brew install openssl  OR  apt install openssl"
-  PREREQ_OK=0
-fi
-
-if have curl; then
-  ok "curl found: $(curl --version | head -n1)"
-else
-  fail "curl not found."
-  PREREQ_OK=0
-fi
-
+# ── Docker daemon ─────────────────────────────────────────────────────────────
 if ! docker info >/dev/null 2>&1; then
-  fail "Docker daemon is not running. Start Docker Desktop or: sudo systemctl start docker"
-  PREREQ_OK=0
+  warn "Docker daemon not running — attempting to start ..."
+  if have systemctl; then
+    systemctl start docker 2>/dev/null && sleep 3
+  elif have service; then
+    service docker start 2>/dev/null && sleep 3
+  fi
+  if docker info >/dev/null 2>&1; then
+    ok "Docker daemon started."
+  else
+    fail "Docker daemon is not running."
+    fail "On macOS: open Docker Desktop app."
+    fail "On Linux: sudo systemctl start docker"
+    exit 1
+  fi
 else
   ok "Docker daemon is running."
-fi
-
-if [ "$PREREQ_OK" = "0" ]; then
-  echo
-  fail "Prerequisites not met — fix the errors above and re-run."
-  exit 1
 fi
 
 # ── STEP 2: Create directory structure ────────────────────────────────────────
