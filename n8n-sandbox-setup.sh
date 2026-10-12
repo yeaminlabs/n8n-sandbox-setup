@@ -531,20 +531,55 @@ ok "docker-compose.yml written to $COMPOSE_FILE"
 # ── STEP 6: Pull images ───────────────────────────────────────────────────────
 banner "Step 6 — Pull Docker Images"
 
+N8N_REGISTRY="docker.n8n.io"
+
+# Check if already logged in to n8n registry
+REGISTRY_AUTH_FILE="${DOCKER_CONFIG:-$HOME/.docker}/config.json"
+ALREADY_LOGGED_IN=0
+if [ -f "$REGISTRY_AUTH_FILE" ] && grep -q "$N8N_REGISTRY" "$REGISTRY_AUTH_FILE" 2>/dev/null; then
+  ALREADY_LOGGED_IN=1
+fi
+
+# Try pulling without login first (in case credentials are cached)
+if docker pull "$SANDBOX_API_IMAGE" >/dev/null 2>&1; then
+  ALREADY_LOGGED_IN=1
+fi
+
+if [ "$ALREADY_LOGGED_IN" = "0" ]; then
+  echo
+  printf "  ${BLD}${CYN}The n8n sandbox images are in a private registry.${RST}\n"
+  printf "  ${BLD}You need an n8n account to pull them.${RST}\n"
+  printf "  ${DIM}Sign up free at: https://app.n8n.cloud/register${RST}\n\n"
+  printf "  ${BLD}Log in to docker.n8n.io now:${RST}\n"
+  printf "  ${DIM}(Enter your n8n.io email and password)${RST}\n\n"
+  docker login "$N8N_REGISTRY"
+  LOGIN_EXIT=$?
+  if [ $LOGIN_EXIT -ne 0 ]; then
+    fail "Login failed. Cannot pull sandbox images without n8n registry access."
+    echo
+    info "If you don't have an n8n account, sign up at https://app.n8n.cloud/register"
+    info "Then re-run this script."
+    exit 1
+  fi
+  ok "Logged in to $N8N_REGISTRY"
+fi
+
 info "Pulling $SANDBOX_API_IMAGE ..."
 if docker pull "$SANDBOX_API_IMAGE" 2>&1 | tail -n3; then
   ok "sandbox-api image ready."
 else
-  warn "Pull failed — the image may require authentication with n8n's registry."
-  warn "Try:  docker login docker.n8n.io"
-  warn "Then: docker pull $SANDBOX_API_IMAGE"
+  fail "Pull failed even after login."
+  info "Make sure your n8n account has access to the sandbox images."
+  info "Check: https://docs.n8n.io/deploy/host-n8n/configure-n8n/set-up-n8n-assistant/"
+  exit 1
 fi
 
 info "Pulling $SANDBOX_RUNNER_IMAGE ..."
 if docker pull "$SANDBOX_RUNNER_IMAGE" 2>&1 | tail -n3; then
   ok "sandbox-runner image ready."
 else
-  warn "Pull failed — see note above about n8n registry auth."
+  fail "Pull failed for runner image."
+  exit 1
 fi
 
 # ── STEP 7: Start the stack ───────────────────────────────────────────────────
